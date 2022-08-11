@@ -338,7 +338,6 @@ func (sc *ScopedCache) IndexField(ctx context.Context, obj client.Object, field 
 
 // Custom functions for ScopedCache
 
-// TODO: Create a method to add a new cache for a CR
 func (sc *ScopedCache) AddResourceCache(resource client.Object, cache cache.Cache) error {
 	isNamespaced, err := IsAPINamespaced(resource, sc.Scheme, sc.RESTMapper)
 	if err != nil {
@@ -353,7 +352,6 @@ func (sc *ScopedCache) AddResourceCache(resource client.Object, cache cache.Cach
 	return nil
 }
 
-// TODO: Create a method to remove a cache for a CR
 func (sc *ScopedCache) RemoveResourceCache(resource client.Object) error {
 	isNamespaced, err := IsAPINamespaced(resource, sc.Scheme, sc.RESTMapper)
 	if err != nil {

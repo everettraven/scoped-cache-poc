@@ -25,6 +25,7 @@ type ScopedCache struct {
 	clusterCache cache.Cache // Should this be Resource based as well?
 	RESTMapper   apimeta.RESTMapper
 	Scheme       *runtime.Scheme
+	isStarted    bool
 }
 
 func ScopedCacheBuilder() cache.NewCacheFunc {
@@ -289,6 +290,8 @@ func (sc *ScopedCache) Start(ctx context.Context) error {
 		}
 	}
 
+	sc.isStarted = true
+
 	<-ctx.Done()
 	return nil
 }
@@ -338,7 +341,7 @@ func (sc *ScopedCache) IndexField(ctx context.Context, obj client.Object, field 
 
 // Custom functions for ScopedCache
 
-func (sc *ScopedCache) AddResourceCache(resource client.Object, cache cache.Cache) error {
+func (sc *ScopedCache) AddResourceCache(ctx context.Context, resource client.Object, cache cache.Cache) error {
 	isNamespaced, err := IsAPINamespaced(resource, sc.Scheme, sc.RESTMapper)
 	if err != nil {
 		return err
@@ -348,7 +351,16 @@ func (sc *ScopedCache) AddResourceCache(resource client.Object, cache cache.Cach
 		return fmt.Errorf("resource must be namespaced")
 	}
 
+	// make sure the namespace exists
+	if _, ok := sc.nsCache[resource.GetNamespace()]; !ok {
+		sc.nsCache[resource.GetNamespace()] = make(ResourceCache)
+	}
+
 	sc.nsCache[resource.GetNamespace()][resource] = cache
+
+	if sc.isStarted {
+		sc.nsCache[resource.GetNamespace()][resource].Start(ctx)
+	}
 	return nil
 }
 
@@ -360,6 +372,11 @@ func (sc *ScopedCache) RemoveResourceCache(resource client.Object) error {
 
 	if !isNamespaced {
 		return fmt.Errorf("resource must be namespaced")
+	}
+
+	// make sure the namespace exists
+	if _, ok := sc.nsCache[resource.GetNamespace()]; !ok {
+		return nil
 	}
 
 	delete(sc.nsCache[resource.GetNamespace()], resource)

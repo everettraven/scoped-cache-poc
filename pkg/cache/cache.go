@@ -364,9 +364,7 @@ func (sc *ScopedCache) RemoveResourceCache(resource client.Object) error {
 		return fmt.Errorf("resource must be namespaced")
 	}
 
-	if _, ok := sc.nsCache[resource.GetNamespace()][resource]; ok {
-		delete(sc.nsCache[resource.GetNamespace()], resource)
-	}
+	delete(sc.nsCache[resource.GetNamespace()], resource)
 
 	return nil
 }

@@ -13,6 +13,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// Cases
+// --------------------
+// 1. Watch a resource across the cluster
+// 2. Watch a resource in a specific namespaces
+// 3. Watch a specific resource in a namespace
+// --------------------
+
 // Cache Stuff
 // --------------------------------
 
@@ -20,12 +27,17 @@ type ResourceCache map[client.Object]cache.Cache
 
 type NamespacedResourceCache map[string]ResourceCache
 
+// type GVKToClusterCache map[schema.GroupVersionKind]cache.Cache
+
+// type GVKToCacheList map[schema.GroupVersionKind][]cache.Cache
+
 type ScopedCache struct {
-	nsCache      NamespacedResourceCache
-	clusterCache cache.Cache // Should this be Resource based as well?
-	RESTMapper   apimeta.RESTMapper
-	Scheme       *runtime.Scheme
-	isStarted    bool
+	nsCache          NamespacedResourceCache
+	clusterCache     cache.Cache
+	RESTMapper       apimeta.RESTMapper
+	Scheme           *runtime.Scheme
+	isStarted        bool
+	gvkClusterScoped map[schema.GroupVersionKind]struct{}
 }
 
 func ScopedCacheBuilder() cache.NewCacheFunc {
@@ -47,6 +59,10 @@ func ScopedCacheBuilder() cache.NewCacheFunc {
 	}
 }
 
+// TODO: in all functions, implement a check that will add a cache if it does not exist
+
+// TODO: in all functions, implement a check that will check if a GVK is already being watched in the cluster cache
+
 // client.Reader implementation
 // ----------------------
 
@@ -56,7 +72,9 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		return err
 	}
 
-	if !isNamespaced {
+	_, clusterScoped := sc.gvkClusterScoped[obj.GetObjectKind().GroupVersionKind()]
+
+	if !isNamespaced || clusterScoped {
 		// Look into the global cache to fetch the object
 		return sc.clusterCache.Get(ctx, key, obj)
 	}
@@ -204,7 +222,11 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 	if err != nil {
 		return nil, err
 	}
-	if !isNamespaced {
+
+	// TODO: If the object is not a real kubernetes resource then add it to the cluster cache.
+	// The For() call in controller-runtime setup calls this function with an empty instance of a CR.
+	// This will ensure the watch is added properly to the cluster cache.
+	if !isNamespaced || obj.GetNamespace() == "" {
 		clusterCacheInf, err := sc.clusterCache.GetInformer(ctx, obj)
 		if err != nil {
 			return nil, err
@@ -213,6 +235,9 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 		informers[globalCache] = ResourceInformer{
 			nil: clusterCacheInf,
 		}
+
+		// add gvk to cluster scoped mapping
+		sc.gvkClusterScoped[obj.GetObjectKind().GroupVersionKind()] = struct{}{}
 
 		return &ScopedInformer{nsInformers: informers}, nil
 	}
@@ -241,6 +266,10 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 	if err != nil {
 		return nil, err
 	}
+
+	// TODO: If the object is not a real kubernetes resource then add it to the cluster cache.
+	// The For() call in controller-runtime setup calls this function with an empty instance of a CR.
+	// This will ensure the watch is added properly to the cluster cache.
 	if !isNamespaced {
 		clusterCacheInf, err := sc.clusterCache.GetInformerForKind(ctx, gvk)
 		if err != nil {

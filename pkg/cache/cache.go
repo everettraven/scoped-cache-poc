@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -26,10 +27,6 @@ import (
 type ResourceCache map[client.Object]cache.Cache
 
 type NamespacedResourceCache map[string]ResourceCache
-
-// type GVKToClusterCache map[schema.GroupVersionKind]cache.Cache
-
-// type GVKToCacheList map[schema.GroupVersionKind][]cache.Cache
 
 type ScopedCache struct {
 	nsCache          NamespacedResourceCache
@@ -55,13 +52,9 @@ func ScopedCacheBuilder() cache.NewCacheFunc {
 			return nil, fmt.Errorf("error creating global cache: %w", err)
 		}
 
-		return &ScopedCache{nsCache: caches, Scheme: opts.Scheme, RESTMapper: opts.Mapper, clusterCache: gCache}, nil
+		return &ScopedCache{nsCache: caches, Scheme: opts.Scheme, RESTMapper: opts.Mapper, clusterCache: gCache, gvkClusterScoped: make(map[schema.GroupVersionKind]struct{})}, nil
 	}
 }
-
-// TODO: in all functions, implement a check that will add a cache if it does not exist
-
-// TODO: in all functions, implement a check that will check if a GVK is already being watched in the cluster cache
 
 // client.Reader implementation
 // ----------------------
@@ -108,54 +101,21 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		return err
 	}
 
-	if !isNamespaced {
+	gvkForListItems := schema.GroupVersionKind{
+		Group:   list.GetObjectKind().GroupVersionKind().Group,
+		Version: list.GetObjectKind().GroupVersionKind().Version,
+		Kind:    strings.TrimSuffix(list.GetObjectKind().GroupVersionKind().Kind, "List"),
+	}
+	_, clusterScoped := sc.gvkClusterScoped[gvkForListItems]
+
+	if !isNamespaced || clusterScoped {
 		// Look at the global cache to get the objects with the specified GVK
 		return sc.clusterCache.List(ctx, list, opts...)
 	}
 
 	// For a specific namespace
 	if listOpts.Namespace != corev1.NamespaceAll {
-		rCache, ok := sc.nsCache[listOpts.Namespace]
-		if !ok {
-			return fmt.Errorf("unable to get: %v because of unknown namespace for the cache", listOpts.Namespace)
-		}
-
-		listAccessor, err := apimeta.ListAccessor(list)
-		if err != nil {
-			return err
-		}
-
-		allItems, err := apimeta.ExtractList(list)
-		if err != nil {
-			return err
-		}
-
-		// Loop through all the caches and get a list from each
-		var resourceVersion string
-		for _, cache := range rCache {
-			listObj := list.DeepCopyObject().(client.ObjectList)
-			err = cache.List(ctx, listObj, &listOpts)
-			if err != nil {
-				continue
-			}
-
-			// add items to the list
-			items, err := apimeta.ExtractList(listObj)
-			if err != nil {
-				return err
-			}
-
-			accessor, err := apimeta.ListAccessor(listObj)
-			if err != nil {
-				return fmt.Errorf("object: %T must be a list type", list)
-			}
-
-			allItems = append(allItems, items...)
-			resourceVersion = accessor.GetResourceVersion()
-		}
-
-		listAccessor.SetResourceVersion(resourceVersion)
-		return apimeta.SetList(list, allItems)
+		return sc.ListForNamespace(ctx, list, listOpts.Namespace, opts...)
 	}
 
 	// For all namespaces
@@ -172,36 +132,82 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 	limitSet := listOpts.Limit > 0
 
 	var resourceVersion string
-	for _, rCache := range sc.nsCache {
-		for _, cache := range rCache {
-			listObj := list.DeepCopyObject().(client.ObjectList)
-			err = cache.List(ctx, listObj, &listOpts)
-			if err != nil {
-				return err
-			}
-			items, err := apimeta.ExtractList(listObj)
-			if err != nil {
-				return err
-			}
-			accessor, err := apimeta.ListAccessor(listObj)
-			if err != nil {
-				return fmt.Errorf("object: %T must be a list type", list)
-			}
-			allItems = append(allItems, items...)
-			// The last list call should have the most correct resource version.
-			resourceVersion = accessor.GetResourceVersion()
-			if limitSet {
-				// decrement Limit by the number of items
-				// fetched from the current namespace.
-				listOpts.Limit -= int64(len(items))
-				// if a Limit was set and the number of
-				// items read has reached this set limit,
-				// then stop reading.
-				if listOpts.Limit == 0 {
-					break
-				}
+	for ns := range sc.nsCache {
+		listObj := list.DeepCopyObject().(client.ObjectList)
+		err := sc.ListForNamespace(ctx, listObj, ns, opts...)
+		if err != nil {
+			return fmt.Errorf("encountered an error listing in namespace `%s`: %w", ns, err)
+		}
+
+		items, err := apimeta.ExtractList(listObj)
+		if err != nil {
+			return fmt.Errorf("encountered an error extracting list in namespace `%s`: %w", ns, err)
+		}
+		accessor, err := apimeta.ListAccessor(listObj)
+		if err != nil {
+			return fmt.Errorf("object: %T must be a list type", list)
+		}
+		allItems = append(allItems, items...)
+		// The last list call should have the most correct resource version.
+		resourceVersion = accessor.GetResourceVersion()
+		if limitSet {
+			// decrement Limit by the number of items
+			// fetched from the current namespace.
+			listOpts.Limit -= int64(len(items))
+			// if a Limit was set and the number of
+			// items read has reached this set limit,
+			// then stop reading.
+			if listOpts.Limit == 0 {
+				break
 			}
 		}
+	}
+
+	listAccessor.SetResourceVersion(resourceVersion)
+	return apimeta.SetList(list, allItems)
+}
+
+func (sc *ScopedCache) ListForNamespace(ctx context.Context, list client.ObjectList, namespace string, opts ...client.ListOption) error {
+	listOpts := client.ListOptions{}
+	listOpts.ApplyOptions(opts)
+
+	rCache, ok := sc.nsCache[namespace]
+	if !ok {
+		return fmt.Errorf("unable to list: %v because of unknown namespace for the cache", namespace)
+	}
+
+	listAccessor, err := apimeta.ListAccessor(list)
+	if err != nil {
+		return err
+	}
+
+	allItems, err := apimeta.ExtractList(list)
+	if err != nil {
+		return err
+	}
+
+	// Loop through all the caches and get a list from each
+	var resourceVersion string
+	for _, cache := range rCache {
+		listObj := list.DeepCopyObject().(client.ObjectList)
+		err = cache.List(ctx, listObj, &listOpts)
+		if err != nil {
+			continue
+		}
+
+		// add items to the list
+		items, err := apimeta.ExtractList(listObj)
+		if err != nil {
+			return err
+		}
+
+		accessor, err := apimeta.ListAccessor(listObj)
+		if err != nil {
+			return fmt.Errorf("object: %T must be a list type", list)
+		}
+
+		allItems = append(allItems, items...)
+		resourceVersion = accessor.GetResourceVersion()
 	}
 
 	listAccessor.SetResourceVersion(resourceVersion)
@@ -223,9 +229,6 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 		return nil, err
 	}
 
-	// TODO: If the object is not a real kubernetes resource then add it to the cluster cache.
-	// The For() call in controller-runtime setup calls this function with an empty instance of a CR.
-	// This will ensure the watch is added properly to the cluster cache.
 	if !isNamespaced || obj.GetNamespace() == "" {
 		clusterCacheInf, err := sc.clusterCache.GetInformer(ctx, obj)
 		if err != nil {
@@ -267,9 +270,6 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 		return nil, err
 	}
 
-	// TODO: If the object is not a real kubernetes resource then add it to the cluster cache.
-	// The For() call in controller-runtime setup calls this function with an empty instance of a CR.
-	// This will ensure the watch is added properly to the cluster cache.
 	if !isNamespaced {
 		clusterCacheInf, err := sc.clusterCache.GetInformerForKind(ctx, gvk)
 		if err != nil {
@@ -349,7 +349,9 @@ func (sc *ScopedCache) IndexField(ctx context.Context, obj client.Object, field 
 		return nil //nolint:nilerr
 	}
 
-	if !isNamespaced {
+	_, clusterScoped := sc.gvkClusterScoped[obj.GetObjectKind().GroupVersionKind()]
+
+	if !isNamespaced || clusterScoped {
 		return sc.clusterCache.IndexField(ctx, obj, field, extractValue)
 	}
 
@@ -388,7 +390,7 @@ func (sc *ScopedCache) AddResourceCache(ctx context.Context, resource client.Obj
 	sc.nsCache[resource.GetNamespace()][resource] = cache
 
 	if sc.isStarted {
-		sc.nsCache[resource.GetNamespace()][resource].Start(ctx)
+		go sc.nsCache[resource.GetNamespace()][resource].Start(ctx)
 	}
 	return nil
 }
@@ -411,6 +413,10 @@ func (sc *ScopedCache) RemoveResourceCache(resource client.Object) error {
 	delete(sc.nsCache[resource.GetNamespace()], resource)
 
 	return nil
+}
+
+func (sc *ScopedCache) GetResourceCache() NamespacedResourceCache {
+	return sc.nsCache
 }
 
 // --------------------------------

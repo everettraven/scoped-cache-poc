@@ -3,12 +3,12 @@ package cache
 import (
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-type ResourceInformer map[client.Object]cache.Informer
+type ResourceInformer map[types.UID]cache.Informer
 
 type NamespacedResourceInformer map[string]ResourceInformer
 

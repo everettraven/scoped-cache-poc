@@ -9,6 +9,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,7 +25,8 @@ import (
 // Cache Stuff
 // --------------------------------
 
-type ResourceCache map[client.Object]cache.Cache
+// use the resource UID
+type ResourceCache map[types.UID]cache.Cache
 
 type NamespacedResourceCache map[string]ResourceCache
 
@@ -236,7 +238,7 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 		}
 		// Use a nil client.Object for the cluster level informers
 		informers[globalCache] = ResourceInformer{
-			nil: clusterCacheInf,
+			types.UID(globalCache): clusterCacheInf,
 		}
 
 		// add gvk to cluster scoped mapping
@@ -277,7 +279,7 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 		}
 		// Use a nil client.Object for the cluster level informers
 		informers[globalCache] = ResourceInformer{
-			nil: clusterCacheInf,
+			types.UID(globalCache): clusterCacheInf,
 		}
 
 		return &ScopedInformer{nsInformers: informers}, nil
@@ -310,10 +312,10 @@ func (sc *ScopedCache) Start(ctx context.Context) error {
 	// start namespaced caches
 	for ns, rCache := range sc.nsCache {
 		for r, cash := range rCache {
-			go func(ns string, r client.Object, c cache.Cache) {
+			go func(ns string, r types.UID, c cache.Cache) {
 				err := c.Start(ctx)
 				if err != nil {
-					fmt.Println("scoped cache failed to start informer |", "namespace", ns, "|", "resource", r)
+					fmt.Println("scoped cache failed to start informer |", "namespace", ns, "|", "resource uid", r)
 				}
 			}(ns, r, cash)
 		}
@@ -387,10 +389,10 @@ func (sc *ScopedCache) AddResourceCache(ctx context.Context, resource client.Obj
 		sc.nsCache[resource.GetNamespace()] = make(ResourceCache)
 	}
 
-	sc.nsCache[resource.GetNamespace()][resource] = cache
+	sc.nsCache[resource.GetNamespace()][resource.GetUID()] = cache
 
 	if sc.isStarted {
-		go sc.nsCache[resource.GetNamespace()][resource].Start(ctx)
+		go sc.nsCache[resource.GetNamespace()][resource.GetUID()].Start(ctx)
 	}
 	return nil
 }
@@ -410,7 +412,7 @@ func (sc *ScopedCache) RemoveResourceCache(resource client.Object) error {
 		return nil
 	}
 
-	delete(sc.nsCache[resource.GetNamespace()], resource)
+	delete(sc.nsCache[resource.GetNamespace()], resource.GetUID())
 
 	return nil
 }

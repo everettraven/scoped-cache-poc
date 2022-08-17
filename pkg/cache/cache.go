@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -13,12 +14,13 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 )
 
 // Cases
 // --------------------
 // 1. Watch a resource across the cluster
-// 2. Watch a resource in a specific namespaces
+// 2. Watch a resource in specific namespaces
 // 3. Watch a specific resource in a namespace
 // --------------------
 
@@ -67,7 +69,13 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		return err
 	}
 
-	_, clusterScoped := sc.gvkClusterScoped[obj.GetObjectKind().GroupVersionKind()]
+	// obj could have an empty GVK, lets make sure we have a proper gvk
+	gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
+	if err != nil {
+		return fmt.Errorf("encountered an error getting GVK for object: %w", err)
+	}
+
+	_, clusterScoped := sc.gvkClusterScoped[gvk]
 
 	if !isNamespaced || clusterScoped {
 		// Look into the global cache to fetch the object
@@ -91,7 +99,7 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 	}
 
 	//If we have made it here, then we couldn't find it in any of the caches
-	return fmt.Errorf("unable to get: %v because it wasn't found in any of the caches", key)
+	return errors.NewNotFound(schema.GroupResource{Group: gvk.Group, Resource: gvk.Kind}, key.Name)
 }
 
 func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
@@ -103,10 +111,16 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		return err
 	}
 
+	// obj could have an empty GVK, lets make sure we have a proper gvk
+	gvk, err := apiutil.GVKForObject(list, sc.Scheme)
+	if err != nil {
+		return fmt.Errorf("encountered an error getting GVK for object: %w", err)
+	}
+
 	gvkForListItems := schema.GroupVersionKind{
-		Group:   list.GetObjectKind().GroupVersionKind().Group,
-		Version: list.GetObjectKind().GroupVersionKind().Version,
-		Kind:    strings.TrimSuffix(list.GetObjectKind().GroupVersionKind().Kind, "List"),
+		Group:   gvk.Group,
+		Version: gvk.Version,
+		Kind:    strings.TrimSuffix(gvk.Kind, "List"),
 	}
 	_, clusterScoped := sc.gvkClusterScoped[gvkForListItems]
 
@@ -221,6 +235,14 @@ func (sc *ScopedCache) ListForNamespace(ctx context.Context, list client.ObjectL
 // cache.Informers implementation
 // ----------------------
 
+// Open Questions:
+// 1. Should we attempt to block informer creation if permissions are not allowed? Essentially do an SSAR to see if list/watch permissions for GVR in namespace
+// 2. Have users set a custom WatchErrorHandler? We could create a wrapper around this that a user could use to stop an informer if a permission error occurs. Would require changes to controller-runtime to propagate this option to the SharedIndexInformer that is created
+
+// My thoughts:
+// We allow all informer creation, but recommend that users set a custom WatchErrorHandler.
+// Having the WatchErrorHandler would allow for silencing errors of an informer not having watch permissions but still keep the informer active.
+// The moment the ServiceAccount has permissions the informer would be able to connect and work as expected.
 func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cache.Informer, error) {
 	informers := make(NamespacedResourceInformer)
 
@@ -231,7 +253,8 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 		return nil, err
 	}
 
-	if !isNamespaced || obj.GetNamespace() == "" {
+	// if there are no resource caches created, assume the cluster cache should be used
+	if !isNamespaced || len(sc.nsCache) == 0 {
 		clusterCacheInf, err := sc.clusterCache.GetInformer(ctx, obj)
 		if err != nil {
 			return nil, err
@@ -241,8 +264,14 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 			types.UID(globalCache): clusterCacheInf,
 		}
 
+		// obj could have an empty GVK, lets make sure we have a proper gvk
+		gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
+		if err != nil {
+			return nil, fmt.Errorf("encountered an error getting GVK for object: %w", err)
+		}
+
 		// add gvk to cluster scoped mapping
-		sc.gvkClusterScoped[obj.GetObjectKind().GroupVersionKind()] = struct{}{}
+		sc.gvkClusterScoped[gvk] = struct{}{}
 
 		return &ScopedInformer{nsInformers: informers}, nil
 	}
@@ -272,7 +301,8 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 		return nil, err
 	}
 
-	if !isNamespaced {
+	// if there are no resource caches created, assume the cluster cache should be used
+	if !isNamespaced || len(sc.nsCache) == 0 {
 		clusterCacheInf, err := sc.clusterCache.GetInformerForKind(ctx, gvk)
 		if err != nil {
 			return nil, err
@@ -281,6 +311,9 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 		informers[globalCache] = ResourceInformer{
 			types.UID(globalCache): clusterCacheInf,
 		}
+
+		// add gvk to cluster scoped mapping
+		sc.gvkClusterScoped[gvk] = struct{}{}
 
 		return &ScopedInformer{nsInformers: informers}, nil
 	}

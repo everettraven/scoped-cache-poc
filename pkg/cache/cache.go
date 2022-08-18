@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +40,7 @@ type ScopedCache struct {
 	Scheme           *runtime.Scheme
 	isStarted        bool
 	gvkClusterScoped map[schema.GroupVersionKind]struct{}
+	cli              dynamic.Interface
 }
 
 func ScopedCacheBuilder() cache.NewCacheFunc {
@@ -56,7 +58,12 @@ func ScopedCacheBuilder() cache.NewCacheFunc {
 			return nil, fmt.Errorf("error creating global cache: %w", err)
 		}
 
-		return &ScopedCache{nsCache: caches, Scheme: opts.Scheme, RESTMapper: opts.Mapper, clusterCache: gCache, gvkClusterScoped: make(map[schema.GroupVersionKind]struct{})}, nil
+		cli, err := dynamic.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("error creating dynamic client: %w", err)
+		}
+
+		return &ScopedCache{nsCache: caches, Scheme: opts.Scheme, RESTMapper: opts.Mapper, clusterCache: gCache, gvkClusterScoped: make(map[schema.GroupVersionKind]struct{}), cli: cli}, nil
 	}
 }
 
@@ -75,11 +82,33 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		return fmt.Errorf("encountered an error getting GVK for object: %w", err)
 	}
 
+	mapping, err := sc.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return fmt.Errorf("encountered an error getting mapping: %w", err)
+	}
+
 	_, clusterScoped := sc.gvkClusterScoped[gvk]
 
 	if !isNamespaced || clusterScoped {
+		permitted, err := canClusterListWatchResource(sc.cli, mapping.Resource)
+		if err != nil {
+			return fmt.Errorf("encountered an error when checking permissions: %w", err)
+		}
+
+		if !permitted {
+			return fmt.Errorf("not permitted to list/watch the given resource at the cluster level")
+		}
 		// Look into the global cache to fetch the object
 		return sc.clusterCache.Get(ctx, key, obj)
+	}
+
+	permittedNs, err := getListWatchNamespacesForResource(sc.cli, mapping.Resource)
+	if err != nil {
+		return fmt.Errorf("encountered an error attempting to get namespaces where list/watch are permitted for the given resource: %w", err)
+	}
+	// if the namespace doesn't have the permissions, skip it
+	if _, ok := permittedNs[key.Namespace]; !ok {
+		return errors.NewForbidden(mapping.Resource.GroupResource(), key.Name, fmt.Errorf("Not permitted based on RBAC"))
 	}
 
 	rCache, ok := sc.nsCache[key.Namespace]
@@ -122,15 +151,39 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		Version: gvk.Version,
 		Kind:    strings.TrimSuffix(gvk.Kind, "List"),
 	}
+
+	mapping, err := sc.RESTMapper.RESTMapping(gvkForListItems.GroupKind(), gvkForListItems.Version)
+	if err != nil {
+		return fmt.Errorf("encountered an error getting mapping: %w", err)
+	}
+
 	_, clusterScoped := sc.gvkClusterScoped[gvkForListItems]
 
 	if !isNamespaced || clusterScoped {
+		permitted, err := canClusterListWatchResource(sc.cli, mapping.Resource)
+		if err != nil {
+			return fmt.Errorf("encountered an error when checking permissions: %w", err)
+		}
+
+		if !permitted {
+			return fmt.Errorf("not permitted to list/watch the given resource at the cluster level")
+		}
 		// Look at the global cache to get the objects with the specified GVK
 		return sc.clusterCache.List(ctx, list, opts...)
 	}
 
+	permittedNs, err := getListWatchNamespacesForResource(sc.cli, mapping.Resource)
+	if err != nil {
+		return fmt.Errorf("encountered an error attempting to get namespaces where list/watch are permitted for the given resource: %w", err)
+	}
+
 	// For a specific namespace
 	if listOpts.Namespace != corev1.NamespaceAll {
+		// if the namespace doesn't have the permissions, skip it
+		if _, ok := permittedNs[listOpts.Namespace]; !ok {
+			return errors.NewForbidden(mapping.Resource.GroupResource(), "list-in-namespace", fmt.Errorf("Not permitted based on RBAC"))
+		}
+
 		return sc.ListForNamespace(ctx, list, listOpts.Namespace, opts...)
 	}
 
@@ -149,6 +202,10 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 
 	var resourceVersion string
 	for ns := range sc.nsCache {
+		// if the namespace doesn't have the permissions, skip it
+		if _, ok := permittedNs[ns]; !ok {
+			continue
+		}
 		listObj := list.DeepCopyObject().(client.ObjectList)
 		err := sc.ListForNamespace(ctx, listObj, ns, opts...)
 		if err != nil {
@@ -243,6 +300,9 @@ func (sc *ScopedCache) ListForNamespace(ctx context.Context, list client.ObjectL
 // We allow all informer creation, but recommend that users set a custom WatchErrorHandler.
 // Having the WatchErrorHandler would allow for silencing errors of an informer not having watch permissions but still keep the informer active.
 // The moment the ServiceAccount has permissions the informer would be able to connect and work as expected.
+
+// Update to this: It turns out that if the informer is not able to connect, it blocks. This makes it so that any other CRs don't get reconciled.
+// We will have to omit getting particular informers if the ServiceAccount does not have permissions
 func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cache.Informer, error) {
 	informers := make(NamespacedResourceInformer)
 
@@ -253,8 +313,28 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 		return nil, err
 	}
 
+	// obj could have an empty GVK, lets make sure we have a proper gvk
+	gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
+	if err != nil {
+		return nil, fmt.Errorf("encountered an error getting GVK for object: %w", err)
+	}
+
+	mapping, err := sc.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return nil, fmt.Errorf("encountered an error getting mapping: %w", err)
+	}
+
 	// if there are no resource caches created, assume the cluster cache should be used
 	if !isNamespaced || len(sc.nsCache) == 0 {
+		permitted, err := canClusterListWatchResource(sc.cli, mapping.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("encountered an error when checking permissions: %w", err)
+		}
+
+		if !permitted {
+			return nil, fmt.Errorf("not permitted to list/watch the given resource at the cluster level")
+		}
+
 		clusterCacheInf, err := sc.clusterCache.GetInformer(ctx, obj)
 		if err != nil {
 			return nil, err
@@ -264,19 +344,22 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 			types.UID(globalCache): clusterCacheInf,
 		}
 
-		// obj could have an empty GVK, lets make sure we have a proper gvk
-		gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
-		if err != nil {
-			return nil, fmt.Errorf("encountered an error getting GVK for object: %w", err)
-		}
-
 		// add gvk to cluster scoped mapping
 		sc.gvkClusterScoped[gvk] = struct{}{}
 
 		return &ScopedInformer{nsInformers: informers}, nil
 	}
 
+	permittedNs, err := getListWatchNamespacesForResource(sc.cli, mapping.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("encountered an error attempting to get namespaces where list/watch are permitted for the given resource: %w", err)
+	}
+
 	for ns, rCache := range sc.nsCache {
+		// if the namespace doesn't have the permissions, skip it
+		if _, ok := permittedNs[ns]; !ok {
+			continue
+		}
 		informers[ns] = make(ResourceInformer)
 		for r, cache := range rCache {
 			informer, err := cache.GetInformer(ctx, obj)
@@ -291,6 +374,7 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 	return &ScopedInformer{nsInformers: informers}, nil
 }
 
+// TODO: Update this function to match the functionality of the GetInformer() function
 func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupVersionKind) (cache.Informer, error) {
 	informers := make(NamespacedResourceInformer)
 

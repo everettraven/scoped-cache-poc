@@ -331,8 +331,11 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 			return nil, fmt.Errorf("encountered an error when checking permissions: %w", err)
 		}
 
+		// If not permitted just go ahead and return a ScopedInformer with no informers.
+		// This makes cluster level GetInformer() requests consistent with namespace level
+		// GetInformer() requests by just not getting an informer where it is not permitted.
 		if !permitted {
-			return nil, fmt.Errorf("not permitted to list/watch the given resource at the cluster level")
+			return &ScopedInformer{nsInformers: informers}, nil
 		}
 
 		clusterCacheInf, err := sc.clusterCache.GetInformer(ctx, obj)

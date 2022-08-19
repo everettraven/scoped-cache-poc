@@ -96,7 +96,7 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		}
 
 		if !permitted {
-			return fmt.Errorf("not permitted to list/watch the given resource at the cluster level")
+			return errors.NewForbidden(mapping.Resource.GroupResource(), key.Name, fmt.Errorf("not permitted to list/watch the given resource at the cluster level"))
 		}
 		// Look into the global cache to fetch the object
 		return sc.clusterCache.Get(ctx, key, obj)
@@ -108,7 +108,7 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 	}
 	// if the namespace doesn't have the permissions, skip it
 	if _, ok := permittedNs[key.Namespace]; !ok {
-		return errors.NewForbidden(mapping.Resource.GroupResource(), key.Name, fmt.Errorf("Not permitted based on RBAC"))
+		return errors.NewForbidden(mapping.Resource.GroupResource(), key.Name, fmt.Errorf("not permitted to list/watch the given resource in the namespace `%s`", key.Namespace))
 	}
 
 	rCache, ok := sc.nsCache[key.Namespace]
@@ -166,7 +166,7 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		}
 
 		if !permitted {
-			return fmt.Errorf("not permitted to list/watch the given resource at the cluster level")
+			return errors.NewForbidden(mapping.Resource.GroupResource(), "cluster-list", fmt.Errorf("not permitted to list/watch the given resource at the cluster level"))
 		}
 		// Look at the global cache to get the objects with the specified GVK
 		return sc.clusterCache.List(ctx, list, opts...)
@@ -179,9 +179,9 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 
 	// For a specific namespace
 	if listOpts.Namespace != corev1.NamespaceAll {
-		// if the namespace doesn't have the permissions, skip it
+		// if the namespace doesn't have the permissions, return a new Forbidden error
 		if _, ok := permittedNs[listOpts.Namespace]; !ok {
-			return errors.NewForbidden(mapping.Resource.GroupResource(), "list-in-namespace", fmt.Errorf("Not permitted based on RBAC"))
+			return errors.NewForbidden(mapping.Resource.GroupResource(), "namespace-list", fmt.Errorf("not permitted to list/watch the given resource in namespace `%s`", listOpts.Namespace))
 		}
 
 		return sc.ListForNamespace(ctx, list, listOpts.Namespace, opts...)
@@ -202,7 +202,8 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 
 	var resourceVersion string
 	for ns := range sc.nsCache {
-		// if the namespace doesn't have the permissions, skip it
+		// If the namespace doesn't have the permissions, skip it.
+		// Essentially only return the values that are allowed to be seen
 		if _, ok := permittedNs[ns]; !ok {
 			continue
 		}
@@ -359,7 +360,8 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 	}
 
 	for ns, rCache := range sc.nsCache {
-		// if the namespace doesn't have the permissions, skip it
+		// If the namespace doesn't have the permissions, skip it.
+		// Only get informers in namespaces where there are permissions
 		if _, ok := permittedNs[ns]; !ok {
 			continue
 		}

@@ -379,7 +379,6 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 	return &ScopedInformer{nsInformers: informers}, nil
 }
 
-// TODO: Update this function to match the functionality of the GetInformer() function
 func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupVersionKind) (cache.Informer, error) {
 	informers := make(NamespacedResourceInformer)
 
@@ -390,8 +389,25 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 		return nil, err
 	}
 
+	mapping, err := sc.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return nil, fmt.Errorf("encountered an error getting mapping: %w", err)
+	}
+
 	// if there are no resource caches created, assume the cluster cache should be used
 	if !isNamespaced || len(sc.nsCache) == 0 {
+		permitted, err := canClusterListWatchResource(sc.cli, mapping.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("encountered an error when checking permissions: %w", err)
+		}
+
+		// If not permitted just go ahead and return a ScopedInformer with no informers.
+		// This makes cluster level GetInformer() requests consistent with namespace level
+		// GetInformer() requests by just not getting an informer where it is not permitted.
+		if !permitted {
+			return &ScopedInformer{nsInformers: informers}, nil
+		}
+
 		clusterCacheInf, err := sc.clusterCache.GetInformerForKind(ctx, gvk)
 		if err != nil {
 			return nil, err
@@ -407,7 +423,17 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 		return &ScopedInformer{nsInformers: informers}, nil
 	}
 
+	permittedNs, err := getListWatchNamespacesForResource(sc.cli, mapping.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("encountered an error attempting to get namespaces where list/watch are permitted for the given resource: %w", err)
+	}
+
 	for ns, rCache := range sc.nsCache {
+		// If the namespace doesn't have the permissions, skip it.
+		// Only get informers in namespaces where there are permissions
+		if _, ok := permittedNs[ns]; !ok {
+			continue
+		}
 		informers[ns] = make(ResourceInformer)
 		for r, cache := range rCache {
 			informer, err := cache.GetInformerForKind(ctx, gvk)

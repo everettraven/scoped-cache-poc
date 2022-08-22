@@ -110,12 +110,12 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		return sc.clusterCache.Get(ctx, key, obj)
 	}
 
-	permittedNs, err := getListWatchNamespacesForResource(sc.cli, mapping.Resource)
+	permitted, err := canListWatchResourceForNamespace(sc.cli, mapping.Resource, key.Namespace)
 	if err != nil {
-		return fmt.Errorf("encountered an error attempting to get namespaces where list/watch are permitted for the given resource: %w", err)
+		return fmt.Errorf("encountered an error when checking list and watch permissions in namespace `%s`: %w", key.Namespace, err)
 	}
-	// if the namespace doesn't have the permissions, skip it
-	if _, ok := permittedNs[key.Namespace]; !ok {
+
+	if !permitted {
 		return errors.NewForbidden(mapping.Resource.GroupResource(), key.Name, fmt.Errorf("not permitted to list/watch the given resource in the namespace `%s`", key.Namespace))
 	}
 
@@ -188,16 +188,16 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		return sc.clusterCache.List(ctx, list, opts...)
 	}
 
-	permittedNs, err := getListWatchNamespacesForResource(sc.cli, mapping.Resource)
-	if err != nil {
-		return fmt.Errorf("encountered an error attempting to get namespaces where list/watch are permitted for the given resource: %w", err)
-	}
-
 	// For a specific namespace
 	if listOpts.Namespace != corev1.NamespaceAll {
 		// if the namespace doesn't have the permissions, return a new Forbidden error
-		if _, ok := permittedNs[listOpts.Namespace]; !ok {
-			return errors.NewForbidden(mapping.Resource.GroupResource(), "namespace-list", fmt.Errorf("not permitted to list/watch the given resource in namespace `%s`", listOpts.Namespace))
+		permitted, err := canListWatchResourceForNamespace(sc.cli, mapping.Resource, listOpts.Namespace)
+		if err != nil {
+			return fmt.Errorf("encountered an error when checking list and watch permissions in namespace `%s`: %w", listOpts.Namespace, err)
+		}
+
+		if !permitted {
+			return errors.NewForbidden(mapping.Resource.GroupResource(), "namespace-list", fmt.Errorf("not permitted to list/watch the given resource in the namespace `%s`", listOpts.Namespace))
 		}
 
 		return sc.ListForNamespace(ctx, list, listOpts.Namespace, opts...)
@@ -220,11 +220,16 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 	for ns := range sc.nsCache {
 		// If the namespace doesn't have the permissions, skip it.
 		// Essentially only return the values that are allowed to be seen
-		if _, ok := permittedNs[ns]; !ok {
+		permitted, err := canListWatchResourceForNamespace(sc.cli, mapping.Resource, ns)
+		if err != nil {
+			return fmt.Errorf("encountered an error when checking list and watch permissions in namespace `%s`: %w", ns, err)
+		}
+		if !permitted {
 			continue
 		}
+
 		listObj := list.DeepCopyObject().(client.ObjectList)
-		err := sc.ListForNamespace(ctx, listObj, ns, opts...)
+		err = sc.ListForNamespace(ctx, listObj, ns, opts...)
 		if err != nil {
 			return fmt.Errorf("encountered an error listing in namespace `%s`: %w", ns, err)
 		}
@@ -398,15 +403,14 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cach
 		return &ScopedInformer{nsInformers: informers}, nil
 	}
 
-	permittedNs, err := getListWatchNamespacesForResource(sc.cli, mapping.Resource)
-	if err != nil {
-		return nil, fmt.Errorf("encountered an error attempting to get namespaces where list/watch are permitted for the given resource: %w", err)
-	}
-
 	for ns, rCache := range sc.nsCache {
 		// If the namespace doesn't have the permissions, skip it.
 		// Only get informers in namespaces where there are permissions
-		if _, ok := permittedNs[ns]; !ok {
+		permitted, err := canListWatchResourceForNamespace(sc.cli, mapping.Resource, ns)
+		if err != nil {
+			return nil, fmt.Errorf("encountered an error when checking list and watch permissions in namespace `%s`: %w", ns, err)
+		}
+		if !permitted {
 			continue
 		}
 		informers[ns] = make(ResourceInformer)
@@ -467,15 +471,14 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 		return &ScopedInformer{nsInformers: informers}, nil
 	}
 
-	permittedNs, err := getListWatchNamespacesForResource(sc.cli, mapping.Resource)
-	if err != nil {
-		return nil, fmt.Errorf("encountered an error attempting to get namespaces where list/watch are permitted for the given resource: %w", err)
-	}
-
 	for ns, rCache := range sc.nsCache {
 		// If the namespace doesn't have the permissions, skip it.
 		// Only get informers in namespaces where there are permissions
-		if _, ok := permittedNs[ns]; !ok {
+		permitted, err := canListWatchResourceForNamespace(sc.cli, mapping.Resource, ns)
+		if err != nil {
+			return nil, fmt.Errorf("encountered an error when checking list and watch permissions in namespace `%s`: %w", ns, err)
+		}
+		if !permitted {
 			continue
 		}
 		informers[ns] = make(ResourceInformer)

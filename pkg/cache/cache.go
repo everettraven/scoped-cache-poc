@@ -254,6 +254,13 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 	}
 
 	listAccessor.SetResourceVersion(resourceVersion)
+
+	// remove duplicates from the list
+	allItems, err = deduplicateList(allItems)
+	if err != nil {
+		return fmt.Errorf("encountered an error attempting to list: %w", err)
+	}
+
 	return apimeta.SetList(list, allItems)
 }
 
@@ -302,6 +309,27 @@ func (sc *ScopedCache) ListForNamespace(ctx context.Context, list client.ObjectL
 
 	listAccessor.SetResourceVersion(resourceVersion)
 	return apimeta.SetList(list, allItems)
+}
+
+// deduplicateList is meant to remove duplicate objects from a list of objects
+func deduplicateList(objs []runtime.Object) ([]runtime.Object, error) {
+	uidMap := make(map[types.UID]struct{})
+	objList := []runtime.Object{}
+
+	for _, obj := range objs {
+		// turn runtime.Object to a client.Object so we can get the resource UID
+		crObj, ok := obj.(client.Object)
+		if !ok {
+			return nil, fmt.Errorf("could not convert list item to client.Object")
+		}
+		// if the UID of the resource is not already in the map then it is a new object
+		// and can be added to the list.
+		if _, ok := uidMap[crObj.GetUID()]; !ok {
+			objList = append(objList, obj)
+		}
+	}
+
+	return objList, nil
 }
 
 // ----------------------

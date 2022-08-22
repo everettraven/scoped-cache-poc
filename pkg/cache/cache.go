@@ -87,9 +87,9 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		return fmt.Errorf("encountered an error getting mapping: %w", err)
 	}
 
-	_, clusterScoped := sc.gvkClusterScoped[gvk]
+	_, gvkClusterScoped := sc.gvkClusterScoped[gvk]
 
-	if !isNamespaced || clusterScoped {
+	if !isNamespaced || gvkClusterScoped || len(sc.nsCache) == 0 {
 		permitted, err := canClusterListWatchResource(sc.cli, mapping.Resource)
 		if err != nil {
 			return fmt.Errorf("encountered an error when checking permissions: %w", err)
@@ -98,6 +98,14 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		if !permitted {
 			return errors.NewForbidden(mapping.Resource.GroupResource(), key.Name, fmt.Errorf("not permitted to list/watch the given resource at the cluster level"))
 		}
+
+		// if we are here and there doesn't already exist an Informer for the resource,
+		// then one will be created at the cluster level so we need to add it to the map
+		// of cluster scoped GVKs.
+		if !gvkClusterScoped {
+			sc.gvkClusterScoped[gvk] = struct{}{}
+		}
+
 		// Look into the global cache to fetch the object
 		return sc.clusterCache.Get(ctx, key, obj)
 	}
@@ -157,9 +165,9 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		return fmt.Errorf("encountered an error getting mapping: %w", err)
 	}
 
-	_, clusterScoped := sc.gvkClusterScoped[gvkForListItems]
+	_, gvkClusterScoped := sc.gvkClusterScoped[gvkForListItems]
 
-	if !isNamespaced || clusterScoped {
+	if !isNamespaced || gvkClusterScoped || len(sc.nsCache) == 0 {
 		permitted, err := canClusterListWatchResource(sc.cli, mapping.Resource)
 		if err != nil {
 			return fmt.Errorf("encountered an error when checking permissions: %w", err)
@@ -168,6 +176,14 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		if !permitted {
 			return errors.NewForbidden(mapping.Resource.GroupResource(), "cluster-list", fmt.Errorf("not permitted to list/watch the given resource at the cluster level"))
 		}
+
+		// if we are here and there doesn't already exist an Informer for the resource,
+		// then one will be created at the cluster level so we need to add it to the map
+		// of cluster scoped GVKs.
+		if !gvkClusterScoped {
+			sc.gvkClusterScoped[gvk] = struct{}{}
+		}
+
 		// Look at the global cache to get the objects with the specified GVK
 		return sc.clusterCache.List(ctx, list, opts...)
 	}

@@ -569,7 +569,8 @@ func (sc *ScopedCache) IndexField(ctx context.Context, obj client.Object, field 
 
 // Custom functions for ScopedCache
 
-func (sc *ScopedCache) AddResourceCache(ctx context.Context, resource client.Object, cache cache.Cache) error {
+// AddResourceCache will add a cache for a particular resource
+func (sc *ScopedCache) AddResourceCache(resource client.Object, cache cache.Cache) error {
 	isNamespaced, err := IsAPINamespaced(resource, sc.Scheme, sc.RESTMapper)
 	if err != nil {
 		return err
@@ -586,12 +587,18 @@ func (sc *ScopedCache) AddResourceCache(ctx context.Context, resource client.Obj
 
 	sc.nsCache[resource.GetNamespace()][resource.GetUID()] = cache
 
-	if sc.isStarted {
-		go sc.nsCache[resource.GetNamespace()][resource.GetUID()].Start(ctx)
-	}
 	return nil
 }
 
+// StartResourceCache used to start a ResourceCache after it has been added
+func (sc *ScopedCache) StartResourceCache(ctx context.Context, resource client.Object) {
+	// only start if the ScopedCache as a whole has been started
+	if sc.isStarted {
+		go sc.nsCache[resource.GetNamespace()][resource.GetUID()].Start(ctx)
+	}
+}
+
+// RemoveResourceCache will remove a cache for a particular resource
 func (sc *ScopedCache) RemoveResourceCache(resource client.Object) error {
 	isNamespaced, err := IsAPINamespaced(resource, sc.Scheme, sc.RESTMapper)
 	if err != nil {
@@ -612,8 +619,13 @@ func (sc *ScopedCache) RemoveResourceCache(resource client.Object) error {
 	return nil
 }
 
+// GetResourceCache will return the mapping of Namespace -> Resource -> Cache
 func (sc *ScopedCache) GetResourceCache() NamespacedResourceCache {
 	return sc.nsCache
 }
+
+// TODO (everettraven): We could potentially optimize the number of watches being
+// created by exposing a function to get informers from a specific ResourceCache.
+// Likely future work and not as important in PoC
 
 // --------------------------------

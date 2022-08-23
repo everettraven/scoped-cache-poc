@@ -60,3 +60,21 @@ func (i *ScopedInformer) HasSynced() bool {
 	}
 	return true
 }
+
+// SetWatchErrorHandler will attempt to set the watch error handler on the informer
+func (i *ScopedInformer) SetWatchErrorHandler(handler toolscache.WatchErrorHandler) error {
+	for _, ri := range i.nsInformers {
+		for _, informer := range ri {
+			if si, ok := informer.(toolscache.SharedInformer); ok {
+				err := si.SetWatchErrorHandler(handler)
+				if err != nil {
+					// if there is an error then we will for now assume the
+					// WatchErrorHandler has already been set for the informer
+					continue
+				}
+			}
+		}
+	}
+
+	return nil
+}

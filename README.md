@@ -44,6 +44,8 @@ Due to the process of adding caches for a CR to the `ScopedCache` being a delibe
 
 For a demonstration of using this library, see the GitHub Repository [everettraven/scoped-operator-poc](https://github.com/everettraven/scoped-operator-poc/tree/test/scoped-cache) - specifically the branch `test/scoped-cache`.
 
+The demonstration can be found in the [Demonstration section of the README](https://github.com/everettraven/scoped-operator-poc/tree/test/scoped-cache#demonstration)
+
 ## Current Limitations
 There are currently a few limitations with this approach:
 - **Limitation**: `controller-runtime` is not designed in such a way that easily enables this functionality. There are workarounds that needed to be created to be able to properly implement this logic.

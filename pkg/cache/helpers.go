@@ -36,7 +36,7 @@ func defaultOpts(config *rest.Config, opts cache.Options) (cache.Options, error)
 		var err error
 		opts.Mapper, err = apiutil.NewDiscoveryRESTMapper(config)
 		if err != nil {
-			return opts, fmt.Errorf("could not create RESTMapper from config")
+			return opts, fmt.Errorf("could not create RESTMapper from config: %w", err)
 		}
 	}
 
@@ -125,7 +125,7 @@ func canVerbResource(cli dynamic.Interface, gvr schema.GroupVersionResource, ver
 
 	createdSSAR, err := createSSAR(cli, ssar)
 	if err != nil {
-		return false, fmt.Errorf("encountered an error creating a cluster level SSAR: %w", err)
+		return false, fmt.Errorf("encountered an error creating a SSAR: %w", err)
 	}
 
 	return createdSSAR.Status.Allowed, nil
@@ -144,12 +144,12 @@ func canClusterListWatchResource(cli dynamic.Interface, gvr schema.GroupVersionR
 func canListWatchResourceForNamespace(cli dynamic.Interface, gvr schema.GroupVersionResource, namespace string) (bool, error) {
 	canList, err := canVerbResource(cli, gvr, "list", namespace)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("encountered an error checking for list permissions: %w", err)
 	}
 
 	canWatch, err := canVerbResource(cli, gvr, "watch", namespace)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("encountered an error checking for watch permissions: %w", err)
 	}
 
 	return canList && canWatch, nil

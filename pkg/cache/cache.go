@@ -73,7 +73,7 @@ func ScopedCacheBuilder() cache.NewCacheFunc {
 func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client.Object) error {
 	isNamespaced, err := IsAPINamespaced(obj, sc.Scheme, sc.RESTMapper)
 	if err != nil {
-		return err
+		return fmt.Errorf("encountered an error checking if api for obj is namespaced: %w", err)
 	}
 
 	// obj could have an empty GVK, lets make sure we have a proper gvk
@@ -121,6 +121,7 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 
 	rCache, ok := sc.nsCache[key.Namespace]
 	if !ok {
+		// TODO: Should this be a NotFound error?
 		return fmt.Errorf("unable to get: %v because of unknown namespace for the cache", key)
 	}
 
@@ -181,7 +182,7 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		// then one will be created at the cluster level so we need to add it to the map
 		// of cluster scoped GVKs.
 		if !gvkClusterScoped {
-			sc.gvkClusterScoped[gvk] = struct{}{}
+			sc.gvkClusterScoped[gvkForListItems] = struct{}{}
 		}
 
 		// Look at the global cache to get the objects with the specified GVK
